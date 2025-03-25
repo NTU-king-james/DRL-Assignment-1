@@ -154,7 +154,7 @@ class StudentAgent:
         print(f"state_key: {state_key}, action: {self.action}")
         return self.action
 
-agent = StudentAgent('checkpoints/checkpoint_30000.pt')
+agent = StudentAgent('best_model/best2.pt')
 agent.reset()
 
 def get_action(obs):

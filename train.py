@@ -117,10 +117,10 @@ class State:
 
 
 class Trainer:
-    def __init__(self, fuel_limit=10000, num_episodes=30000, max_steps=5000, gamma=0.95, 
-                 epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.9999, learning_rate=0.1):
+    def __init__(self, fuel_limit=10000, num_episodes=100000, max_steps=5000, gamma=0.95, 
+                 epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.99997, learning_rate=0.1):
         self.env = HardTaxiEnv(fuel_limit=fuel_limit)
-        self.checkpoint_dir = "checkpoints_2"
+        self.checkpoint_dir = "checkpoints"
         if not os.path.exists(self.checkpoint_dir):
             os.makedirs(self.checkpoint_dir)
         
@@ -141,8 +141,12 @@ class Trainer:
         self.best_reward = float('-inf')
         self.episode_rewards = []
         self.episode_shaped_rewards = []
-        self.done_episodes_history = []  # 新增：追蹤每個episode的完成狀態
-        self.episode_numbers = []  # 新增：追蹤episode編號
+        self.done_episodes_history = []
+        self.episode_numbers = []
+        
+        # 新增：追蹤前三個最佳模型
+        self.top_3_models = []  # 格式: [(avg_reward, episode, q_table), ...]
+        self.eval_window = 100  # 評估窗口大小
     
     def get_q_value(self, state_key, action):
         return self.q_table[state_key][action]
@@ -247,6 +251,61 @@ class Trainer:
         plt.savefig('training_progress.png')
         plt.close()
     
+    def save_checkpoint(self, episode):
+        checkpoint_path = os.path.join(self.checkpoint_dir, f"checkpoint_{episode}.pt")
+        serializable_q_table = {}
+        for state_key, q_values in self.q_table.items():
+            serializable_q_table[state_key] = q_values.tolist()
+        with open(checkpoint_path, 'wb') as f:
+            pickle.dump({
+                'episode': episode,
+                'q_table': serializable_q_table,
+                'best_reward': self.best_reward,
+            }, f)
+        self.clean_old_checkpoints()
+    
+    def update_top_3_models(self, episode):
+        if len(self.episode_rewards) < 100:  # 確保至少有100個episode的數據
+            return
+            
+        # 計算最近100個episode的平均獎勵
+        recent_avg_reward = np.mean(self.episode_rewards[-100:])
+        
+        # 準備當前模型
+        current_model = (recent_avg_reward, episode, self.q_table.copy())
+        
+        # 更新前三個最佳模型
+        if len(self.top_3_models) < 3:
+            self.top_3_models.append(current_model)
+            self.top_3_models.sort(key=lambda x: x[0], reverse=True)
+        else:
+            # 如果當前模型比最差的好，則替換
+            if recent_avg_reward > self.top_3_models[-1][0]:
+                self.top_3_models.pop()
+                self.top_3_models.append(current_model)
+                self.top_3_models.sort(key=lambda x: x[0], reverse=True)
+        
+        # 保存前三個最佳模型
+        for i, (avg_reward, ep, q_table) in enumerate(self.top_3_models):
+            model_path = os.path.join(self.checkpoint_dir, f"top_{i+1}_model_episode_{ep}.pt")
+            serializable_q_table = {}
+            for state_key, q_values in q_table.items():
+                serializable_q_table[state_key] = q_values.tolist()
+            with open(model_path, 'wb') as f:
+                pickle.dump({
+                    'episode': ep,
+                    'q_table': serializable_q_table,
+                    'avg_reward': avg_reward,
+                }, f)
+    
+    def clean_old_checkpoints(self):
+        checkpoints = glob.glob(os.path.join(self.checkpoint_dir, "checkpoint_*.pt"))
+        # 使用 episode 數字進行排序
+        checkpoints.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+        if len(checkpoints) > 3:
+            for old_checkpoint in checkpoints[:-3]:
+                os.remove(old_checkpoint)
+    
     def train(self):
         done_episodes = 0
         for episode in range(self.num_episodes):
@@ -254,7 +313,6 @@ class Trainer:
             state_manager = State()
             state_manager.update(env_state)
             
-            # 採用 extended state 表示，並轉換為 tuple 作為 Q 表的 key
             current_full_state = state_manager.get_full_state(env_state)
             current_state_key = state_manager.get_state_key(current_full_state)
             
@@ -285,7 +343,6 @@ class Trainer:
                     break
                 if take_status and not next_take_status:
                     break
-                # 如果沒有可以移動的方向，則停止
                 can_move = current_full_state[2:6]
                 if np.sum(can_move) == 0:
                     break
@@ -295,45 +352,30 @@ class Trainer:
             self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
             self.episode_rewards.append(episode_reward)
             self.episode_shaped_rewards.append(episode_shaped_rewards)
-            self.done_episodes_history.append(done_episodes)  # 記錄完成episode的數量
-            self.episode_numbers.append(episode + 1)  # 記錄episode編號
+            self.done_episodes_history.append(done_episodes)
+            self.episode_numbers.append(episode + 1)
             
             if (episode + 1) % 100 == 0:
                 avg_reward = np.mean(self.episode_rewards[-100:])
                 avg_shaped_reward = np.mean(self.episode_shaped_rewards[-100:])
                 print(f"Episode {episode + 1}, Average Reward: {avg_reward:.2f}, Average Shaped Reward: {avg_shaped_reward:.2f}, Done Episodes: {done_episodes}")
                 done_episodes = 0
-                self.save_checkpoint(episode + 1)
+                if episode + 1 > 80000:
+                    self.save_checkpoint(episode + 1)
+                    self.update_top_3_models(episode + 1)
+                
+                    # 打印前三個最佳模型的資訊
+                    print("\nTop 3 Models:")
+                    for i, (avg_reward, ep, _) in enumerate(self.top_3_models):
+                        print(f"Rank {i+1}: Episode {ep}, Average Reward: {avg_reward:.2f}")
             
             if episode_reward > self.best_reward:
                 self.best_reward = episode_reward
                 print(f"New best reward: {self.best_reward}")
         
         print(f"Training finished. Best reward: {self.best_reward}")
-        self.plot_training_progress()  # 訓練結束時繪製圖表
-    
-    def save_checkpoint(self, episode):
-        checkpoint_path = os.path.join(self.checkpoint_dir, f"checkpoint_{episode}.pt")
-        serializable_q_table = {}
-        for state_key, q_values in self.q_table.items():
-            serializable_q_table[state_key] = q_values.tolist()
-        with open(checkpoint_path, 'wb') as f:
-            pickle.dump({
-                'episode': episode,
-                'q_table': serializable_q_table,
-                'best_reward': self.best_reward,
-            }, f)
-        self.clean_old_checkpoints()
-    
-    def clean_old_checkpoints(self):
-        checkpoints = glob.glob(os.path.join(self.checkpoint_dir, "checkpoint_*.pt"))
-        # 使用 episode 數字進行排序
-        checkpoints.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
-        if len(checkpoints) > 3:
-            for old_checkpoint in checkpoints[:-3]:
-                os.remove(old_checkpoint)
-                # print(f"刪除舊的checkpoint: {old_checkpoint}")
-    
+        self.plot_training_progress()
+
 if __name__ == "__main__":
     trainer = Trainer()
     trainer.train()
