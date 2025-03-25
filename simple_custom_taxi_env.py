@@ -14,7 +14,7 @@ import random
 
 
 class SimpleTaxiEnv():
-    def __init__(self, grid_size=5, fuel_limit=50):
+    def __init__(self, grid_size=5, fuel_limit=1000):
         """
         Custom Taxi environment supporting different grid sizes.
         """
@@ -23,9 +23,8 @@ class SimpleTaxiEnv():
         self.current_fuel = fuel_limit
         self.passenger_picked_up = False
         
-        self.stations = [(0, 0), (0, self.grid_size - 1), (self.grid_size - 1, 0), (self.grid_size - 1, self.grid_size - 1)]
         self.passenger_loc = None
-       
+        self.stations = None
         self.obstacles = set()  # No obstacles in simple version
         self.destination = None
 
@@ -34,17 +33,41 @@ class SimpleTaxiEnv():
         self.current_fuel = self.fuel_limit
         self.passenger_picked_up = False
         
-
+        self.grid_size = random.randint(5, 10)  # Random size between 5 and 10
+        
+        # 生成隨機站點位置，確保不相連
+        def is_valid_station(pos, existing_stations):
+            if not (0 <= pos[0] < self.grid_size and 0 <= pos[1] < self.grid_size):
+                return False
+            # 檢查是否與現有站點相鄰
+            for station in existing_stations:
+                if abs(pos[0] - station[0]) + abs(pos[1] - station[1]) <= 1:
+                    return False
+            return True
+        
+        # 生成四個不相連的站點
+        self.stations = []
+        max_attempts = 100  # 防止無限循環
+        attempts = 0
+        
+        while len(self.stations) < 4 and attempts < max_attempts:
+            pos = (random.randint(0, self.grid_size-1), random.randint(0, self.grid_size-1))
+            if is_valid_station(pos, self.stations):
+                self.stations.append(pos)
+            attempts += 1
+        
+        # 如果無法生成足夠的站點，使用預設位置
+        if len(self.stations) < 4:
+            self.stations = [(0, 0), (0, self.grid_size - 1), 
+                           (self.grid_size - 1, 0), (self.grid_size - 1, self.grid_size - 1)]
+        
         available_positions = [
             (x, y) for x in range(self.grid_size) for y in range(self.grid_size)
             if (x, y) not in self.stations and (x, y) not in self.obstacles
         ]
 
         self.taxi_pos = random.choice(available_positions)
-        
         self.passenger_loc = random.choice([pos for pos in self.stations])
-        
-        
         possible_destinations = [s for s in self.stations if s != self.passenger_loc]
         self.destination = random.choice(possible_destinations)
         
@@ -143,9 +166,9 @@ class SimpleTaxiEnv():
         
         
         grid[0][0]='R'
-        grid[0][4]='G'
-        grid[4][0]='Y'
-        grid[4][4]='B'
+        grid[0][self.grid_size-1]='G'
+        grid[self.grid_size-1][0]='Y'
+        grid[self.grid_size-1][self.grid_size-1]='B'
         '''
         # Place destination
         dy, dx = destination_pos
@@ -186,7 +209,7 @@ def run_agent(agent_file, env_config, render=False):
     total_reward = 0
     done = False
     step_count = 0
-    stations = [(0, 0), (0, 4), (4, 0), (4,4)]
+    # stations = [(0, 0), (0, 4), (4, 0), (4,4)]
     
     taxi_row, taxi_col, _,_,_,_,_,_,_,_,obstacle_north, obstacle_south, obstacle_east, obstacle_west, passenger_look, destination_look = obs
 
@@ -218,5 +241,5 @@ if __name__ == "__main__":
         "fuel_limit": 5000
     }
     
-    agent_score = run_agent("student_agent.py", env_config, render=True)
+    agent_score = run_agent("student_agent.py", env_config, render=False)
     print(f"Final Score: {agent_score}")

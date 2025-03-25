@@ -1,100 +1,327 @@
 import gym
 import numpy as np
-from model import Actor, Critic
-import torch
-import torch.optim as optim
+from simple_custom_taxi_env import SimpleTaxiEnv
+import os
+import glob
+import random
+import pickle
+from collections import defaultdict
+import matplotlib.pyplot as plt
+from hard_env import HardTaxiEnv
 
-def train():
-    # Create the Taxi-v3 environment
-    env = gym.make('Taxi-v3', render_mode='human')
-    
-    # Get the observation and action spaces
-    state_dim = env.observation_space.n  # Discrete observation space
-    action_dim = env.action_space.n      # Discrete action space
-    
-    # Initialize networks
-    actor = Actor(state_dim, action_dim)
-    critic = Critic(state_dim)
-    actor_optimizer = optim.Adam(actor.parameters(), lr=0.001)
-    critic_optimizer = optim.Adam(critic.parameters(), lr=0.001)
-    
-    # Training parameters
-    num_episodes = 1000
-    max_steps = 100
-    gamma = 0.99
-    
-    best_reward = float('-inf')
-    
-    for episode in range(num_episodes):
-        state = env.reset()
-        if isinstance(state, tuple):
-            state = state[0]  # Handle the new gym API
+# 修改後的 State 類別，包含 extended state 表示
+class State:
+    def __init__(self):
+        self.visited_stations = [0, 0, 0, 0]  # 分別代表 R, G, Y, B 站點是否已拜訪
+        self.take_status = False
+        # 新增：可移動方向的狀態 (東南西北)
+        self.can_move = [1, 1, 1, 1]
+        # 新增：當前要訪問的站點索引
+        self.current_target_station = 0
+        self.visit_num = 0
+        self.at_station = False
+        self.passenger_pos = -1
+        self.destination_pos = -1
+    def update(self, env_state, action=None):
+        taxi_row, taxi_col = env_state[0], env_state[1]
+        taxi_pos = (taxi_row, taxi_col)
         
-        episode_reward = 0
+        # env_state[10:14] 分別代表東南西北方向是否有障礙物
+        self.can_move = [
+            not env_state[10],  # 東
+            not env_state[11],  # 南
+            not env_state[12],  # 西
+            not env_state[13]   # 北
+        ]
         
-        for step in range(max_steps):
-            # Convert state to one-hot encoding
-            state_tensor = torch.zeros(state_dim)
-            state_tensor[state] = 1
+        # 更新 visited_stations：若 taxi 到達某站點，標記為已拜訪
+        self.at_station = False
+        idx = None
+        for i, station_pos in enumerate([env_state[2:4], env_state[4:6], env_state[6:8], env_state[8:10]]):
+            if taxi_pos == tuple(station_pos):
+                if env_state[14]:
+                    self.passenger_pos = i
+                if env_state[15]:
+                    self.destination_pos = i
+                self.visited_stations[i] = 1
+                self.at_station = True
+                idx = i
             
-            # Get action probabilities from actor
-            action_probs = actor(state_tensor)
-            
-            # Sample action from probability distribution
-            action = torch.multinomial(action_probs, 1).item()
-            
-            # Take action in environment
-            next_state, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            
-            # Convert next state to one-hot encoding
-            next_state_tensor = torch.zeros(state_dim)
-            next_state_tensor[next_state] = 1
-            
-            # Get value estimates
-            current_value = critic(state_tensor)
-            next_value = critic(next_state_tensor)
-            
-            # Calculate advantage
-            advantage = reward + gamma * next_value.detach() - current_value.detach()
-            
-            # Actor loss
-            log_prob = torch.log(action_probs[action])
-            actor_loss = -log_prob * advantage.detach()
-            
-            # Critic loss
-            critic_loss = advantage.pow(2)
-            
-            # Update networks
-            actor_optimizer.zero_grad()
-            actor_loss.backward()
-            actor_optimizer.step()
-            
-            critic_optimizer.zero_grad()
-            critic_loss.backward()
-            critic_optimizer.step()
-            
-            episode_reward += reward
-            state = next_state
-            
-            if done:
+        # 處理 pickup 與 dropoff 動作
+        if action == 4:  # pickup
+            if env_state[-2] and self.at_station and not self.take_status:  # passenger_look
+                self.take_status = True
+                # 重置 visited_stations，只保留上車站點
+                self.visited_stations = [0, 0, 0, 0]
+                self.visited_stations[idx] = 1
+        elif action == 5:  # dropoff
+            self.take_status = False
+
+        self.visit_num = sum(self.visited_stations)
+
+        if not self.take_status:
+            if self.passenger_pos != -1:
+                self.current_target_station = self.passenger_pos
+                return
+        elif self.take_status:
+            if self.destination_pos != -1:
+                self.current_target_station = self.destination_pos
+                return
+       
+        for j in range(4):
+            if self.visited_stations[j] == 0:
+                self.current_target_station = j
                 break
-        
-        print(f"Episode {episode + 1}, Reward: {episode_reward}")
-        
-        # Save the best model
-        if episode_reward > best_reward:
-            best_reward = episode_reward
-            torch.save({
-                'actor_state_dict': actor.state_dict(),
-                'critic_state_dict': critic.state_dict(),
-                'state_dim': state_dim,
-                'action_dim': action_dim,
-                'best_reward': best_reward
-            }, 'best_model.pth')
-            print(f"New best model saved with reward: {best_reward}")
-    
-    env.close()
 
+        # 計算 visit_num
+        self.visit_num = sum(self.visited_stations)
+    
+    def get_full_state(self, env_state):
+        """
+        full state：
+        - 2維：目標站點相對位置 [0-1]
+        - 4維：可移動方向 [2-5]
+        - 2維：乘客和目的地是否在附近 [6-7]
+        - 1維：take_status [8]
+        - 1維：visit_num [9]
+        - 1維：at_station [10]
+        總共 11 維
+        """
+        # 計算目標站點相對於計程車的位置
+        target_row, target_col = env_state[2 + self.current_target_station*2], env_state[3 + self.current_target_station*2]
+        taxi_row, taxi_col = env_state[0], env_state[1]
+        
+        # 組合所有狀態
+        rel_row = target_row - taxi_row
+        rel_col = target_col - taxi_col
+        full_state = np.concatenate([
+            [rel_row, rel_col],    # [0-1] 目標站點相對位置
+            self.can_move,         # [2-5] 可移動方向
+            env_state[14:16],       # [6-7] 乘客和目的地狀態
+            [self.take_status],     # [8] 載客狀態
+            [self.visit_num],        # [9] 拜訪站點數
+            [self.at_station]        # [10] 是否在站點
+        ])
+        
+        return full_state
+    
+    def get_state_key(self, state):
+        """將 state 轉換為可作為 Q 表 key 的 tuple"""
+        return tuple(state.astype(int))
+
+
+class Trainer:
+    def __init__(self, fuel_limit=10000, num_episodes=25000, max_steps=5000, gamma=0.99, 
+                 epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.9997, learning_rate=0.2):
+        self.env = HardTaxiEnv(fuel_limit=fuel_limit)
+        self.checkpoint_dir = "checkpoints"
+        if not os.path.exists(self.checkpoint_dir):
+            os.makedirs(self.checkpoint_dir)
+        
+        self.num_episodes = num_episodes
+        self.max_steps = max_steps
+        self.gamma = gamma
+        self.learning_rate = learning_rate
+        
+        self.epsilon = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.epsilon_decay = epsilon_decay
+        
+        self.action_dim = 6  # 動作數量：南、北、東、西、pickup、dropoff
+        
+        # Q 表的 key 採用 extended state 的 tuple 表示，每個 state 對應 6 個動作的 Q 值
+        self.q_table = defaultdict(lambda: np.zeros(self.action_dim))
+        
+        self.best_reward = float('-inf')
+        self.episode_rewards = []
+        self.episode_shaped_rewards = []
+        self.done_episodes_history = []  # 新增：追蹤每個episode的完成狀態
+        self.episode_numbers = []  # 新增：追蹤episode編號
+    
+    def get_q_value(self, state_key, action):
+        return self.q_table[state_key][action]
+    
+    def update_q_value(self, state_key, action, value):
+        self.q_table[state_key][action] = value
+    
+    def select_action(self, state_key):
+        if random.random() < self.epsilon:
+            return random.randrange(self.action_dim)
+        return np.argmax(self.q_table[state_key])
+    
+    def calculate_shaped_reward(self, current_full_state, next_full_state, reward, done, action):
+        """
+        利用 potential-based reward shaping：
+        定義潛力函數為 taxi 與目標站點 Manhattan 距離的負值，
+        並引入 alpha 係數調整其影響力。
+        """
+        if done:
+            return reward
+        
+        shaped_reward = reward
+        can_move = current_full_state[2:6]
+        passenger_look = current_full_state[6]
+        next_passenger_look = next_full_state[6]
+        destination_look = current_full_state[7]
+        next_destination_look = next_full_state[7]
+        take_status = current_full_state[8]
+        next_take_status = next_full_state[8]
+        visit_num = current_full_state[9]
+        next_visit_num = next_full_state[9]
+        at_station = current_full_state[10]
+        if action >= 4:
+            # at_station = current_full_state[0] == next_full_state[0] and current_full_state[1] == next_full_state[1]
+            if not take_status and next_take_status:
+                shaped_reward += 50
+            if take_status and not next_take_status:
+                shaped_reward -= 50
+            if not passenger_look and action == 4:
+                shaped_reward -= 20
+            if not destination_look and action == 5:
+                shaped_reward -= 20
+            return shaped_reward
+
+        if visit_num < next_visit_num:
+            shaped_reward += 10
+            return shaped_reward
+        
+        if can_move[action] == 0:
+            shaped_reward -= 30
+        if at_station and not take_status and action != 4 and passenger_look:
+            shaped_reward -= 10
+        if at_station and take_status and action != 5 and destination_look:
+            shaped_reward -= 10
+
+
+        phi_current = -abs(current_full_state[0]) - abs(current_full_state[1])
+        phi_next = -abs(next_full_state[0]) - abs(next_full_state[1])
+
+
+        alpha = 0.5 
+        shaped_reward += alpha * (self.gamma * phi_next - phi_current)
+
+        if not take_status and not passenger_look and next_passenger_look:
+            shaped_reward += 30
+        if not take_status and passenger_look and not next_passenger_look:
+            shaped_reward -= 30
+        if take_status and not destination_look and next_destination_look:
+            shaped_reward += 30
+        if take_status and destination_look and not next_destination_look:
+            shaped_reward -= 30
+
+        return shaped_reward
+    
+    def plot_training_progress(self):
+        """繪製訓練進度的圖表"""
+        plt.figure(figsize=(12, 5))
+        
+        # 繪製reward變化
+        plt.subplot(1, 2, 1)
+        plt.plot(self.episode_numbers, self.episode_rewards, label='Episode Reward')
+        plt.title('Episode Rewards Over Time')
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        plt.legend()
+        
+        # 繪製完成episode的變化
+        plt.subplot(1, 2, 2)
+        plt.plot(self.episode_numbers, self.done_episodes_history, label='Done Episodes')
+        plt.title('Completed Episodes Over Time')
+        plt.xlabel('Episode')
+        plt.ylabel('Done Episodes')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig('training_progress.png')
+        plt.close()
+    
+    def train(self):
+        done_episodes = 0
+        for episode in range(self.num_episodes):
+            env_state, _ = self.env.reset()
+            state_manager = State()
+            state_manager.update(env_state)
+            
+            # 採用 extended state 表示，並轉換為 tuple 作為 Q 表的 key
+            current_full_state = state_manager.get_full_state(env_state)
+            current_state_key = state_manager.get_state_key(current_full_state)
+            
+            episode_reward = 0
+            episode_shaped_rewards = 0
+            
+            for step in range(self.max_steps):
+                action = self.select_action(current_state_key)
+                next_env_state, reward, done, _ = self.env.step(action)
+                state_manager.update(next_env_state, action)
+                
+                next_full_state = state_manager.get_full_state(next_env_state)
+                next_state_key = state_manager.get_state_key(next_full_state)
+
+                shaped_reward = self.calculate_shaped_reward(current_full_state, next_full_state, reward, done, action)
+                
+                current_q = self.get_q_value(current_state_key, action)
+                next_max_q = max(self.get_q_value(next_state_key, a) for a in range(self.action_dim))
+                new_q = current_q + self.learning_rate * (shaped_reward + self.gamma * next_max_q - current_q)
+                self.update_q_value(current_state_key, action, new_q)
+                
+                episode_reward += reward
+                episode_shaped_rewards += shaped_reward
+                take_status = current_full_state[8]
+                next_take_status = next_full_state[8]
+                if done:
+                    done_episodes += 1
+                    break
+                if take_status and not next_take_status:
+                    break
+                # 如果沒有可以移動的方向，則停止
+                can_move = current_full_state[2:6]
+                if np.sum(can_move) == 0:
+                    break
+                current_state_key = next_state_key
+                current_full_state = next_full_state
+            
+            self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+            self.episode_rewards.append(episode_reward)
+            self.episode_shaped_rewards.append(episode_shaped_rewards)
+            self.done_episodes_history.append(done_episodes)  # 記錄完成episode的數量
+            self.episode_numbers.append(episode + 1)  # 記錄episode編號
+            
+            if (episode + 1) % 100 == 0:
+                avg_reward = np.mean(self.episode_rewards[-100:])
+                avg_shaped_reward = np.mean(self.episode_shaped_rewards[-100:])
+                print(f"Episode {episode + 1}, Average Reward: {avg_reward:.2f}, Average Shaped Reward: {avg_shaped_reward:.2f}, Done Episodes: {done_episodes}")
+                done_episodes = 0
+                self.save_checkpoint(episode + 1)
+            
+            if episode_reward > self.best_reward:
+                self.best_reward = episode_reward
+                print(f"New best reward: {self.best_reward}")
+        
+        print(f"Training finished. Best reward: {self.best_reward}")
+        self.plot_training_progress()  # 訓練結束時繪製圖表
+    
+    def save_checkpoint(self, episode):
+        checkpoint_path = os.path.join(self.checkpoint_dir, f"checkpoint_{episode}.pt")
+        serializable_q_table = {}
+        for state_key, q_values in self.q_table.items():
+            serializable_q_table[state_key] = q_values.tolist()
+        with open(checkpoint_path, 'wb') as f:
+            pickle.dump({
+                'episode': episode,
+                'q_table': serializable_q_table,
+                'best_reward': self.best_reward,
+            }, f)
+        self.clean_old_checkpoints()
+    
+    def clean_old_checkpoints(self):
+        checkpoints = glob.glob(os.path.join(self.checkpoint_dir, "checkpoint_*.pt"))
+        # 使用 episode 數字進行排序
+        checkpoints.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+        if len(checkpoints) > 3:
+            for old_checkpoint in checkpoints[:-3]:
+                os.remove(old_checkpoint)
+                # print(f"刪除舊的checkpoint: {old_checkpoint}")
+    
 if __name__ == "__main__":
-    train() 
+    trainer = Trainer()
+    trainer.train()
