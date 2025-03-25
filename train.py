@@ -18,24 +18,26 @@ class State:
         self.can_move = [1, 1, 1, 1]
         # 新增：當前要訪問的站點索引
         self.current_target_station = 0
-        self.visit_num = 0
         self.at_station = False
+        self.new_station = False  # 新增：是否到達新的站點
         self.passenger_pos = -1
         self.destination_pos = -1
+        
     def update(self, env_state, action=None):
         taxi_row, taxi_col = env_state[0], env_state[1]
         taxi_pos = (taxi_row, taxi_col)
         
         # env_state[10:14] 分別代表東南西北方向是否有障礙物
         self.can_move = [
-            not env_state[10],  # 東
             not env_state[11],  # 南
-            not env_state[12],  # 西
-            not env_state[13]   # 北
+            not env_state[10],  # 北
+            not env_state[12],  # 東
+            not env_state[13]   # 西
         ]
         
         # 更新 visited_stations：若 taxi 到達某站點，標記為已拜訪
         self.at_station = False
+        self.new_station = False  # 重置 new_station 狀態
         idx = None
         for i, station_pos in enumerate([env_state[2:4], env_state[4:6], env_state[6:8], env_state[8:10]]):
             if taxi_pos == tuple(station_pos):
@@ -43,6 +45,8 @@ class State:
                     self.passenger_pos = i
                 if env_state[15]:
                     self.destination_pos = i
+                if self.visited_stations[i] == 0:  # 如果是新的站點
+                    self.new_station = True
                 self.visited_stations[i] = 1
                 self.at_station = True
                 idx = i
@@ -57,8 +61,6 @@ class State:
         elif action == 5:  # dropoff
             self.take_status = False
 
-        self.visit_num = sum(self.visited_stations)
-
         if not self.take_status:
             if self.passenger_pos != -1:
                 self.current_target_station = self.passenger_pos
@@ -72,9 +74,6 @@ class State:
             if self.visited_stations[j] == 0:
                 self.current_target_station = j
                 break
-
-        # 計算 visit_num
-        self.visit_num = sum(self.visited_stations)
     
     def get_full_state(self, env_state):
         """
@@ -83,8 +82,8 @@ class State:
         - 4維：可移動方向 [2-5]
         - 2維：乘客和目的地是否在附近 [6-7]
         - 1維：take_status [8]
-        - 1維：visit_num [9]
-        - 1維：at_station [10]
+        - 1維：at_station [9]
+        - 1維：new_station [10]
         總共 11 維
         """
         # 計算目標站點相對於計程車的位置
@@ -99,8 +98,8 @@ class State:
             self.can_move,         # [2-5] 可移動方向
             env_state[14:16],       # [6-7] 乘客和目的地狀態
             [self.take_status],     # [8] 載客狀態
-            [self.visit_num],        # [9] 拜訪站點數
-            [self.at_station]        # [10] 是否在站點
+            [self.at_station],      # [9] 是否在站點
+            [self.new_station]      # [10] 是否到達新的站點
         ])
         
         return full_state
@@ -111,10 +110,10 @@ class State:
 
 
 class Trainer:
-    def __init__(self, fuel_limit=10000, num_episodes=25000, max_steps=5000, gamma=0.99, 
-                 epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.9997, learning_rate=0.2):
+    def __init__(self, fuel_limit=10000, num_episodes=30000, max_steps=5000, gamma=0.95, 
+                 epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.9999, learning_rate=0.1):
         self.env = HardTaxiEnv(fuel_limit=fuel_limit)
-        self.checkpoint_dir = "checkpoints"
+        self.checkpoint_dir = "checkpoints_2"
         if not os.path.exists(self.checkpoint_dir):
             os.makedirs(self.checkpoint_dir)
         
@@ -158,7 +157,7 @@ class Trainer:
         if done:
             return reward
         
-        shaped_reward = reward
+        shaped_reward = reward - 0.4
         can_move = current_full_state[2:6]
         passenger_look = current_full_state[6]
         next_passenger_look = next_full_state[6]
@@ -166,11 +165,12 @@ class Trainer:
         next_destination_look = next_full_state[7]
         take_status = current_full_state[8]
         next_take_status = next_full_state[8]
-        visit_num = current_full_state[9]
-        next_visit_num = next_full_state[9]
-        at_station = current_full_state[10]
+        at_station = current_full_state[9]
+        new_station = next_full_state[10]
+        
         if action >= 4:
-            # at_station = current_full_state[0] == next_full_state[0] and current_full_state[1] == next_full_state[1]
+            if not at_station:
+                shaped_reward -= 50
             if not take_status and next_take_status:
                 shaped_reward += 50
             if take_status and not next_take_status:
@@ -181,7 +181,8 @@ class Trainer:
                 shaped_reward -= 20
             return shaped_reward
 
-        if visit_num < next_visit_num:
+        # 檢查是否訪問了新站點
+        if new_station:
             shaped_reward += 10
             return shaped_reward
         
@@ -192,10 +193,8 @@ class Trainer:
         if at_station and take_status and action != 5 and destination_look:
             shaped_reward -= 10
 
-
         phi_current = -abs(current_full_state[0]) - abs(current_full_state[1])
         phi_next = -abs(next_full_state[0]) - abs(next_full_state[1])
-
 
         alpha = 0.5 
         shaped_reward += alpha * (self.gamma * phi_next - phi_current)

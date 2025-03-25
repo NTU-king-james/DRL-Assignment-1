@@ -65,7 +65,10 @@ class HardTaxiEnv():
         self.current_fuel = self.fuel_limit
         self.passenger_picked_up = False
         
-        self.grid_size = random.randint(5, 10)  # Random size between 5 and 10
+        map_sizes = np.arange(5, 11)  # [5, 6, 7, 8, 9, 10]
+        weights = map_sizes ** 2
+        probabilities = weights / weights.sum()
+        self.grid_size = np.random.choice(map_sizes, p=probabilities)
         
         # 生成隨機站點位置，確保不相連
         def is_valid_station(pos, existing_stations):
@@ -95,7 +98,7 @@ class HardTaxiEnv():
         
         # 生成隨機障礙物
         self.obstacles = set()
-        num_obstacles = random.randint(0, self.grid_size)  # 隨機障礙物數量
+        num_obstacles = random.randint(0, int(self.grid_size*1.5))  # 隨機障礙物數量
         attempts = 0
         max_attempts = 1000  # 防止無限循環
 
