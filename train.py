@@ -22,8 +22,13 @@ class State:
         self.new_station = False  # 新增：是否到達新的站點
         self.passenger_pos = -1
         self.destination_pos = -1
-        
+        self.prev_action = -1
+        self.action = -1
+
     def update(self, env_state, action=None):
+        if self.action is not None:
+            self.prev_action = self.action
+        self.action = action
         taxi_row, taxi_col = env_state[0], env_state[1]
         taxi_pos = (taxi_row, taxi_col)
         
@@ -84,7 +89,8 @@ class State:
         - 1維：take_status [8]
         - 1維：at_station [9]
         - 1維：new_station [10]
-        總共 11 維
+        - 1維：prev_action [11]
+        總共 12 維
         """
         # 計算目標站點相對於計程車的位置
         target_row, target_col = env_state[2 + self.current_target_station*2], env_state[3 + self.current_target_station*2]
@@ -99,7 +105,8 @@ class State:
             env_state[14:16],       # [6-7] 乘客和目的地狀態
             [self.take_status],     # [8] 載客狀態
             [self.at_station],      # [9] 是否在站點
-            [self.new_station]      # [10] 是否到達新的站點
+            [self.new_station],      # [10] 是否到達新的站點
+            [self.prev_action]      # [11] 前一個動作
         ])
         
         return full_state
@@ -167,7 +174,7 @@ class Trainer:
         next_take_status = next_full_state[8]
         at_station = current_full_state[9]
         new_station = next_full_state[10]
-        
+        prev_action = current_full_state[11]
         if action >= 4:
             if not at_station:
                 shaped_reward -= 50
@@ -196,8 +203,7 @@ class Trainer:
         phi_current = -abs(current_full_state[0]) - abs(current_full_state[1])
         phi_next = -abs(next_full_state[0]) - abs(next_full_state[1])
 
-        alpha = 0.5 
-        shaped_reward += alpha * (self.gamma * phi_next - phi_current)
+        shaped_reward += phi_next - phi_current
 
         if not take_status and not passenger_look and next_passenger_look:
             shaped_reward += 30
@@ -207,7 +213,14 @@ class Trainer:
             shaped_reward += 30
         if take_status and destination_look and not next_destination_look:
             shaped_reward -= 30
-
+        if prev_action == 2 and action == 3:
+            shaped_reward -= 30
+        if prev_action == 3 and action == 2:
+            shaped_reward -= 30
+        if prev_action == 0 and action == 1:
+            shaped_reward -= 30
+        if prev_action == 1 and action == 0:
+            shaped_reward -= 30
         return shaped_reward
     
     def plot_training_progress(self):

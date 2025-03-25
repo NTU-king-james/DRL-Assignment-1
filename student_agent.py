@@ -98,7 +98,7 @@ class State:
             [self.take_status],     # [8] 載客狀態
             [self.at_station],      # [9] 是否在站點
             [self.new_station],      # [10] 是否到達新的站點
-            #[self.prev_action]      # [11] 前一個動作
+            [self.prev_action]      # [11] 前一個動作
         ])
         
         return full_state
@@ -154,7 +154,7 @@ class StudentAgent:
         print(f"state_key: {state_key}, action: {self.action}")
         return self.action
 
-agent = StudentAgent('checkpoints_2/checkpoint_30000.pt')
+agent = StudentAgent('checkpoints/checkpoint_30000.pt')
 agent.reset()
 
 def get_action(obs):
