@@ -14,13 +14,10 @@ class State:
         self.new_station = False  # 新增：是否到達新的站點
         self.passenger_pos = -1
         self.destination_pos = -1
-        self.prev_action = -1
-        self.action = -1
+        self.action = None
 
     def update(self, env_state, action=None):
-        if self.action is not None:
-            self.prev_action = self.action
-        self.action = action
+
         taxi_row, taxi_col = env_state[0], env_state[1]
         taxi_pos = (taxi_row, taxi_col)
         
@@ -56,8 +53,9 @@ class State:
                 self.visited_stations = [0, 0, 0, 0]
                 self.visited_stations[idx] = 1
         elif action == 5:  # dropoff
-            self.take_status = False
-
+            if self.take_status:
+                self.take_status = False
+                self.passenger_pos = -1
         if not self.take_status:
             if self.passenger_pos != -1:
                 self.current_target_station = self.passenger_pos
@@ -81,8 +79,7 @@ class State:
         - 1維：take_status [8]
         - 1維：at_station [9]
         - 1維：new_station [10]
-        - 1維：prev_action [11]
-        總共 12 維
+        總共 11 維
         """
         # 計算目標站點相對於計程車的位置
         target_row, target_col = env_state[2 + self.current_target_station*2], env_state[3 + self.current_target_station*2]
@@ -98,7 +95,6 @@ class State:
             [self.take_status],     # [8] 載客狀態
             [self.at_station],      # [9] 是否在站點
             [self.new_station],      # [10] 是否到達新的站點
-            [self.prev_action]      # [11] 前一個動作
         ])
         
         return full_state
@@ -154,7 +150,7 @@ class StudentAgent:
         print(f"state_key: {state_key}, action: {self.action}")
         return self.action
 
-agent = StudentAgent('best_model/best2.pt')
+agent = StudentAgent('checkpoints/checkpoint_100000.pt')
 agent.reset()
 
 def get_action(obs):

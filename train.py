@@ -22,13 +22,9 @@ class State:
         self.new_station = False  # 新增：是否到達新的站點
         self.passenger_pos = -1
         self.destination_pos = -1
-        self.prev_action = -1
-        self.action = -1
 
     def update(self, env_state, action=None):
-        if self.action is not None:
-            self.prev_action = self.action
-        self.action = action
+
         taxi_row, taxi_col = env_state[0], env_state[1]
         taxi_pos = (taxi_row, taxi_col)
         
@@ -89,8 +85,7 @@ class State:
         - 1維：take_status [8]
         - 1維：at_station [9]
         - 1維：new_station [10]
-        - 1維：prev_action [11]
-        總共 12 維
+        總共 11 維
         """
         # 計算目標站點相對於計程車的位置
         target_row, target_col = env_state[2 + self.current_target_station*2], env_state[3 + self.current_target_station*2]
@@ -106,7 +101,6 @@ class State:
             [self.take_status],     # [8] 載客狀態
             [self.at_station],      # [9] 是否在站點
             [self.new_station],      # [10] 是否到達新的站點
-            [self.prev_action]      # [11] 前一個動作
         ])
         
         return full_state
@@ -117,7 +111,7 @@ class State:
 
 
 class Trainer:
-    def __init__(self, fuel_limit=10000, num_episodes=100000, max_steps=5000, gamma=0.95, 
+    def __init__(self, fuel_limit=10000, num_episodes=100000, max_steps=5000, gamma=0.99, 
                  epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.99997, learning_rate=0.1):
         self.env = HardTaxiEnv(fuel_limit=fuel_limit)
         self.checkpoint_dir = "checkpoints"
@@ -178,14 +172,14 @@ class Trainer:
         next_take_status = next_full_state[8]
         at_station = current_full_state[9]
         new_station = next_full_state[10]
-        prev_action = current_full_state[11]
+
         if action >= 4:
             if not at_station:
                 shaped_reward -= 50
             if not take_status and next_take_status:
                 shaped_reward += 50
             if take_status and not next_take_status:
-                shaped_reward -= 50
+                shaped_reward -= 100
             if not passenger_look and action == 4:
                 shaped_reward -= 20
             if not destination_look and action == 5:
@@ -194,7 +188,7 @@ class Trainer:
 
         # 檢查是否訪問了新站點
         if new_station:
-            shaped_reward += 10
+            shaped_reward += 30
             return shaped_reward
         
         if can_move[action] == 0:
@@ -204,10 +198,13 @@ class Trainer:
         if at_station and take_status and action != 5 and destination_look:
             shaped_reward -= 10
 
-        phi_current = -abs(current_full_state[0]) - abs(current_full_state[1])
-        phi_next = -abs(next_full_state[0]) - abs(next_full_state[1])
+        phi_current = abs(current_full_state[0]) + abs(current_full_state[1])
+        phi_next = abs(next_full_state[0]) + abs(next_full_state[1])
 
-        shaped_reward += phi_next - phi_current
+        if phi_next - phi_current < 0:
+            shaped_reward += 1
+        if phi_next - phi_current > 0:
+            shaped_reward -= 2
 
         if not take_status and not passenger_look and next_passenger_look:
             shaped_reward += 30
@@ -217,15 +214,8 @@ class Trainer:
             shaped_reward += 30
         if take_status and destination_look and not next_destination_look:
             shaped_reward -= 30
-        if prev_action == 2 and action == 3:
-            shaped_reward -= 30
-        if prev_action == 3 and action == 2:
-            shaped_reward -= 30
-        if prev_action == 0 and action == 1:
-            shaped_reward -= 30
-        if prev_action == 1 and action == 0:
-            shaped_reward -= 30
-        return shaped_reward
+            
+        return shaped_reward  # 確保所有情況都有返回值
     
     def plot_training_progress(self):
         """繪製訓練進度的圖表"""
@@ -263,12 +253,17 @@ class Trainer:
                 'best_reward': self.best_reward,
             }, f)
         self.clean_old_checkpoints()
-    
+
+
     def update_top_3_models(self, episode):
-        if len(self.episode_rewards) < 100:  # 確保至少有100個episode的數據
+        # 只有在 90000 epoch 之後才開始更新 top 3 模型
+        if episode < 80000:
             return
-            
-        # 計算最近100個episode的平均獎勵
+
+        if len(self.episode_rewards) < 100:  # 確保至少有100個 episode 的數據
+            return
+
+        # 計算最近100個 episode 的平均獎勵
         recent_avg_reward = np.mean(self.episode_rewards[-100:])
         
         # 準備當前模型
@@ -281,11 +276,16 @@ class Trainer:
         else:
             # 如果當前模型比最差的好，則替換
             if recent_avg_reward > self.top_3_models[-1][0]:
+                # 刪除舊檔案：取出最差模型的 episode
+                worst_ep = self.top_3_models[-1][1]
+                worst_file_pattern = os.path.join(self.checkpoint_dir, f"top_*_model_episode_{worst_ep}.pt")
+                for file in glob.glob(worst_file_pattern):
+                    os.remove(file)
                 self.top_3_models.pop()
                 self.top_3_models.append(current_model)
                 self.top_3_models.sort(key=lambda x: x[0], reverse=True)
         
-        # 保存前三個最佳模型
+        # 儲存當前 top 3 模型（以固定命名覆蓋更新）
         for i, (avg_reward, ep, q_table) in enumerate(self.top_3_models):
             model_path = os.path.join(self.checkpoint_dir, f"top_{i+1}_model_episode_{ep}.pt")
             serializable_q_table = {}
@@ -297,14 +297,35 @@ class Trainer:
                     'q_table': serializable_q_table,
                     'avg_reward': avg_reward,
                 }, f)
-    
+        
+        # 刪除所有不在目前 top 3 模型中的 top 模型檔案
+        self.clean_old_top_model_checkpoints()
+
+
+    def clean_old_top_model_checkpoints(self):
+        # 找出所有符合 top 模型檔案格式的檔案
+        top_files = glob.glob(os.path.join(self.checkpoint_dir, "top_*_model_episode_*.pt"))
+        # 取得目前 top 3 模型的 episode 集合
+        valid_episodes = {model[1] for model in self.top_3_models}
+        for file in top_files:
+            # 從檔名中解析 episode 數字，檔名格式例如 "top_1_model_episode_12345.pt"
+            try:
+                ep_num = int(file.split('_')[-1].split('.')[0])
+            except ValueError:
+                continue  # 若解析失敗就跳過
+            if ep_num not in valid_episodes:
+                os.remove(file)
+
+
     def clean_old_checkpoints(self):
+        # 清除一般 checkpoint 檔案，只保留最新的 3 個
         checkpoints = glob.glob(os.path.join(self.checkpoint_dir, "checkpoint_*.pt"))
         # 使用 episode 數字進行排序
         checkpoints.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
         if len(checkpoints) > 3:
             for old_checkpoint in checkpoints[:-3]:
                 os.remove(old_checkpoint)
+
     
     def train(self):
         done_episodes = 0
@@ -343,9 +364,6 @@ class Trainer:
                     break
                 if take_status and not next_take_status:
                     break
-                can_move = current_full_state[2:6]
-                if np.sum(can_move) == 0:
-                    break
                 current_state_key = next_state_key
                 current_full_state = next_full_state
             
@@ -360,10 +378,12 @@ class Trainer:
                 avg_shaped_reward = np.mean(self.episode_shaped_rewards[-100:])
                 print(f"Episode {episode + 1}, Average Reward: {avg_reward:.2f}, Average Shaped Reward: {avg_shaped_reward:.2f}, Done Episodes: {done_episodes}")
                 done_episodes = 0
-                if episode + 1 > 80000:
+                
+                # 在 90000 epoch 後開始保存和更新前三個最佳模型
+                if episode + 1 >= 80000:
                     self.save_checkpoint(episode + 1)
                     self.update_top_3_models(episode + 1)
-                
+                    
                     # 打印前三個最佳模型的資訊
                     print("\nTop 3 Models:")
                     for i, (avg_reward, ep, _) in enumerate(self.top_3_models):
