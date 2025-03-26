@@ -135,7 +135,7 @@ class StudentAgent:
         state_key = self.state_manager.get_state_key(full_state)
 
         # 根據 Q table 選擇最佳動作
-        if state_key not in self.q_table:
+        if state_key not in self.q_table or np.sum(self.q_table[state_key]) == 0:
             #print("NO")
             if state_key not in self.unknown_state:
                 print(f"Unknown state: {state_key}")
@@ -145,12 +145,13 @@ class StudentAgent:
             print(f"state_key: {state_key}, action: {self.action}")
             return self.action
 
+        print(self.q_table[state_key])
         self.action = np.argmax(self.q_table[state_key])
        
         print(f"state_key: {state_key}, action: {self.action}")
         return self.action
 
-agent = StudentAgent('checkpoints/checkpoint_100000.pt')
+agent = StudentAgent('checkpoints/top_1_model_episode_112300.pt')
 agent.reset()
 
 def get_action(obs):

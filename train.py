@@ -111,8 +111,8 @@ class State:
 
 
 class Trainer:
-    def __init__(self, fuel_limit=10000, num_episodes=100000, max_steps=5000, gamma=0.99, 
-                 epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.99997, learning_rate=0.1):
+    def __init__(self, fuel_limit=10000, num_episodes=120000, max_steps=5000, gamma=0.99, 
+                 epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.999975, learning_rate=0.1):
         self.env = HardTaxiEnv(fuel_limit=fuel_limit)
         self.checkpoint_dir = "checkpoints"
         if not os.path.exists(self.checkpoint_dir):
@@ -204,7 +204,7 @@ class Trainer:
         if phi_next - phi_current < 0:
             shaped_reward += 1
         if phi_next - phi_current > 0:
-            shaped_reward -= 2
+            shaped_reward -= 5
 
         if not take_status and not passenger_look and next_passenger_look:
             shaped_reward += 30
@@ -257,7 +257,7 @@ class Trainer:
 
     def update_top_3_models(self, episode):
         # 只有在 90000 epoch 之後才開始更新 top 3 模型
-        if episode < 80000:
+        if episode < 100000:
             return
 
         if len(self.episode_rewards) < 100:  # 確保至少有100個 episode 的數據
@@ -380,7 +380,7 @@ class Trainer:
                 done_episodes = 0
                 
                 # 在 90000 epoch 後開始保存和更新前三個最佳模型
-                if episode + 1 >= 80000:
+                if episode + 1 >= 100000:
                     self.save_checkpoint(episode + 1)
                     self.update_top_3_models(episode + 1)
                     
