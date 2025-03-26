@@ -135,12 +135,17 @@ class StudentAgent:
         state_key = self.state_manager.get_state_key(full_state)
 
         # 根據 Q table 選擇最佳動作
-        if state_key not in self.q_table or np.sum(self.q_table[state_key]) == 0:
+        if state_key not in self.q_table:
             #print("NO")
             if state_key not in self.unknown_state:
                 print(f"Unknown state: {state_key}")
                 self.unknown_state.append(state_key)
 
+            self.action = np.random.randint(self.action_dim)
+            print(f"state_key: {state_key}, action: {self.action}")
+            return self.action
+        
+        if np.sum(self.q_table[state_key]) == 0:
             self.action = np.random.randint(self.action_dim)
             print(f"state_key: {state_key}, action: {self.action}")
             return self.action
